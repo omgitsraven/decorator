@@ -1,6 +1,13 @@
 import {setLocalTransform} from './utils';
 
-let mat = new AFRAME.THREE.Matrix4();
+//just to spare garbage collection:
+let localTransform = new AFRAME.THREE.Matrix4();
+let avgPos = new AFRAME.THREE.Vector3();
+let avgRot = new AFRAME.THREE.Quaternion();
+let scaleVec = new AFRAME.THREE.Vector3();
+let incrementMtx = new AFRAME.THREE.Matrix4();
+let inverseMtx = new AFRAME.THREE.Matrix4();
+let newObjMtx = new AFRAME.THREE.Matrix4();
 
 AFRAME.registerComponent('grabbable', {
 	dependencies: ['sync'],
@@ -9,8 +16,9 @@ AFRAME.registerComponent('grabbable', {
 	},
 	init: function()
 	{
-		this.grabber = null;
-		this.localTransform = new AFRAME.THREE.Matrix4();
+		this.grabbers = new Set();
+		this.lastLocalTransform = new AFRAME.THREE.Matrix4();
+		this.refreshGrab = false;
 
 		// pre-bound event handlers
 		this._hoverStart = this.hoverStart.bind(this);
@@ -41,23 +49,21 @@ AFRAME.registerComponent('grabbable', {
 	},
 	pickup: function({detail: hand})
 	{
-		this.grabber = hand;
-
-		// the transform of the object in hand space
-		hand.object3D.updateMatrixWorld(true);
-		this.el.object3D.updateMatrixWorld(true);
-		this.localTransform.getInverse(hand.object3D.matrixWorld)
-			.multiply(this.el.object3D.matrixWorld);
+		this.grabbers.add(hand);
 
 		this.el.setAttribute('collision', 'kinematic', true);
 		hand.addEventListener('gripup', this._drop);
+		this.refreshGrab = true;
 	},
 	drop: function({detail: hand})
 	{
-		if(this.grabber === hand)
+		if(this.grabbers.size)
 		{
-			this.grabber = null;
-			this.el.setAttribute('collision', 'kinematic', false);
+			this.grabbers.delete(hand);
+			this.refreshGrab = true;
+			if(!this.grabbers.size){
+				this.el.setAttribute('collision', 'kinematic', false);
+			}
 		}
 	},
 	hoverEnd: function({detail: hand})
@@ -66,14 +72,43 @@ AFRAME.registerComponent('grabbable', {
 	},
 	tick: function()
 	{
-		if(this.grabber)
+		if(this.grabbers.size)
 		{
-			this.grabber.object3D.updateMatrixWorld(true);
-			setLocalTransform(this.el,
-				mat.getInverse(this.el.object3D.parent.matrixWorld)
-				.multiply(this.grabber.object3D.matrixWorld)
-				.multiply(this.localTransform)
-			);
+			if (this.grabbers.size == 1) {//one-handed
+				let grabber = this.grabbers.values().next().value;
+				localTransform.copy(grabber.object3D.matrix);
+			} else {//two-handed
+				let curGrabbers = this.grabbers.values();
+				let grabA = curGrabbers.next().value;
+				let grabB = curGrabbers.next().value;
+				avgPos.copy(grabA.object3D.position).lerp(grabB.object3D.position,0.5);
+				avgRot.copy(grabA.object3D.quaternion).slerp(grabB.object3D.quaternion,0.5);
+				let scaleAmt = grabA.object3D.position.distanceTo(grabB.object3D.position);
+				scaleVec.set(scaleAmt,scaleAmt,scaleAmt);
+				localTransform.compose(avgPos,avgRot,scaleVec);
+			}
+			
+			inverseMtx.getInverse(this.el.object3D.parent.matrixWorld);
+			localTransform.premultiply(inverseMtx);
+			
+			if (this.refreshGrab) {
+				//don't interpolate across hand-number changes;
+				//this is how passing between hands works smoothly
+				//(& also how first frame prepares for subsequent frames)
+				this.lastLocalTransform.copy(localTransform);
+				this.refreshGrab = false;
+			}
+			
+			incrementMtx.copy(localTransform);
+			inverseMtx.getInverse(this.lastLocalTransform);
+			incrementMtx.multiply(inverseMtx);
+			this.el.object3D.updateMatrix();
+			newObjMtx.copy(this.el.object3D.matrix);
+			newObjMtx.premultiply(incrementMtx);
+			
+			setLocalTransform(this.el, newObjMtx);
+			
+			this.lastLocalTransform.copy(localTransform);
 		}
 	},
 	spawnPickup: function()

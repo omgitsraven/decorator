@@ -3002,7 +3002,14 @@ AFRAME.registerComponent('altspace-controls', {
 	}
 });
 
-var mat = new AFRAME.THREE.Matrix4();
+//just to spare garbage collection:
+var localTransform = new AFRAME.THREE.Matrix4();
+var avgPos = new AFRAME.THREE.Vector3();
+var avgRot = new AFRAME.THREE.Quaternion();
+var scaleVec = new AFRAME.THREE.Vector3();
+var incrementMtx = new AFRAME.THREE.Matrix4();
+var inverseMtx = new AFRAME.THREE.Matrix4();
+var newObjMtx = new AFRAME.THREE.Matrix4();
 
 AFRAME.registerComponent('grabbable', {
 	dependencies: ['sync'],
@@ -3010,8 +3017,9 @@ AFRAME.registerComponent('grabbable', {
 		enabled: { default: true }
 	},
 	init: function init() {
-		this.grabber = null;
-		this.localTransform = new AFRAME.THREE.Matrix4();
+		this.grabbers = new _Set();
+		this.lastLocalTransform = new AFRAME.THREE.Matrix4();
+		this.refreshGrab = false;
 
 		// pre-bound event handlers
 		this._hoverStart = this.hoverStart.bind(this);
@@ -3039,22 +3047,21 @@ AFRAME.registerComponent('grabbable', {
 	pickup: function pickup(_ref2) {
 		var hand = _ref2.detail;
 
-		this.grabber = hand;
-
-		// the transform of the object in hand space
-		hand.object3D.updateMatrixWorld(true);
-		this.el.object3D.updateMatrixWorld(true);
-		this.localTransform.getInverse(hand.object3D.matrixWorld).multiply(this.el.object3D.matrixWorld);
+		this.grabbers.add(hand);
 
 		this.el.setAttribute('collision', 'kinematic', true);
 		hand.addEventListener('gripup', this._drop);
+		this.refreshGrab = true;
 	},
 	drop: function drop(_ref3) {
 		var hand = _ref3.detail;
 
-		if (this.grabber === hand) {
-			this.grabber = null;
-			this.el.setAttribute('collision', 'kinematic', false);
+		if (this.grabbers.size) {
+			this.grabbers.delete(hand);
+			this.refreshGrab = true;
+			if (!this.grabbers.size) {
+				this.el.setAttribute('collision', 'kinematic', false);
+			}
 		}
 	},
 	hoverEnd: function hoverEnd(_ref4) {
@@ -3063,9 +3070,44 @@ AFRAME.registerComponent('grabbable', {
 		hand.removeEventListener('gripdown', this._pickup);
 	},
 	tick: function tick() {
-		if (this.grabber) {
-			this.grabber.object3D.updateMatrixWorld(true);
-			setLocalTransform(this.el, mat.getInverse(this.el.object3D.parent.matrixWorld).multiply(this.grabber.object3D.matrixWorld).multiply(this.localTransform));
+		if (this.grabbers.size) {
+			if (this.grabbers.size == 1) {
+				//one-handed
+				var grabber = this.grabbers.values().next().value;
+				localTransform.copy(grabber.object3D.matrix);
+			} else {
+				//two-handed
+				var curGrabbers = this.grabbers.values();
+				var grabA = curGrabbers.next().value;
+				var grabB = curGrabbers.next().value;
+				avgPos.copy(grabA.object3D.position).lerp(grabB.object3D.position, 0.5);
+				avgRot.copy(grabA.object3D.quaternion).slerp(grabB.object3D.quaternion, 0.5);
+				var scaleAmt = grabA.object3D.position.distanceTo(grabB.object3D.position);
+				scaleVec.set(scaleAmt, scaleAmt, scaleAmt);
+				localTransform.compose(avgPos, avgRot, scaleVec);
+			}
+
+			inverseMtx.getInverse(this.el.object3D.parent.matrixWorld);
+			localTransform.premultiply(inverseMtx);
+
+			if (this.refreshGrab) {
+				//don't interpolate across hand-number changes;
+				//this is how passing between hands works smoothly
+				//(& also how first frame prepares for subsequent frames)
+				this.lastLocalTransform.copy(localTransform);
+				this.refreshGrab = false;
+			}
+
+			incrementMtx.copy(localTransform);
+			inverseMtx.getInverse(this.lastLocalTransform);
+			incrementMtx.multiply(inverseMtx);
+			this.el.object3D.updateMatrix();
+			newObjMtx.copy(this.el.object3D.matrix);
+			newObjMtx.premultiply(incrementMtx);
+
+			setLocalTransform(this.el, newObjMtx);
+
+			this.lastLocalTransform.copy(localTransform);
 		}
 	},
 	spawnPickup: function spawnPickup() {
@@ -3852,23 +3894,15 @@ AFRAME.registerSystem('collision', {
 				for (var _iterator = _getIterator(newHits), _step; !(_iteratorNormalCompletion = (_step = _iterator.next()).done); _iteratorNormalCompletion = true) {
 					var _manifold = _step.value;
 
-					console.log('new hit!');
 					var co1 = _manifold.getBody0(),
 					    co2 = _manifold.getBody1();
 					var el1 = this.el2co.getA(co1),
 					    el2 = this.el2co.getA(co2);
 					if (!el1 || !el2) continue;
 
-					console.log('valid hit');
 					var el1targets = el1.getAttribute('collision').with,
 					    el2targets = el2.getAttribute('collision').with;
-					console.log(el1targets.map(function (x) {
-						return x.id;
-					}), el2targets.map(function (x) {
-						return x.id;
-					}));
 					if (el1targets.includes(el2) && el2targets.includes(el1)) {
-						console.log('collision-start', el1.id, el2.id);
 						el2.emit('collision-start', el1, false);
 						el1.emit('collision-start', el2, false);
 					}
@@ -3911,7 +3945,6 @@ AFRAME.registerSystem('collision', {
 					var _el1targets = [].concat(_toConsumableArray(_el.getAttribute('collision').with)),
 					    _el2targets = [].concat(_toConsumableArray(_el2.getAttribute('collision').with));
 					if (_el1targets.includes(_el2) && _el2targets.includes(_el)) {
-						console.log('hit end');
 						_el2.emit('collision-end', _el, false);
 						_el.emit('collision-end', _el2, false);
 					}
@@ -4229,7 +4262,7 @@ AFRAME.registerComponent('quaternion', {
 	schema: { type: 'vec4' },
 	update: function update() {
 		//this.el.object3D.quaternion.copy(this.data);
-		var e = new AFRAME.THREE.Euler().setFromQuaternion(this.data, 'YZX').toVector3().multiplyScalar(180 / Math.PI);
+		var e = new AFRAME.THREE.Euler().setFromQuaternion(this.data, 'YXZ').toVector3().multiplyScalar(180 / Math.PI);
 		this.el.setAttribute('rotation', e);
 	}
 });
