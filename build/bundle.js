@@ -3010,6 +3010,15 @@ var scaleVec = new AFRAME.THREE.Vector3();
 var incrementMtx = new AFRAME.THREE.Matrix4();
 var inverseMtx = new AFRAME.THREE.Matrix4();
 var newObjMtx = new AFRAME.THREE.Matrix4();
+var boundingBox = new AFRAME.THREE.Box3();
+var boundingSize = new AFRAME.THREE.Vector3();
+var boundingCenter = new AFRAME.THREE.Vector3();
+
+var upVec = new AFRAME.THREE.Vector3(0, 1, 0);
+var headJoint = void 0;
+altspace.getThreeJSTrackingSkeleton().then(function (skeletonInfo) {
+	headJoint = skeletonInfo.getJoint('Head');
+});
 
 AFRAME.registerComponent('grabbable', {
 	dependencies: ['sync'],
@@ -3020,6 +3029,7 @@ AFRAME.registerComponent('grabbable', {
 		this.grabbers = new _Set();
 		this.lastLocalTransform = new AFRAME.THREE.Matrix4();
 		this.refreshGrab = false;
+		this.deletePrompting = false;
 
 		// pre-bound event handlers
 		this._hoverStart = this.hoverStart.bind(this);
@@ -3060,7 +3070,11 @@ AFRAME.registerComponent('grabbable', {
 			this.grabbers.delete(hand);
 			this.refreshGrab = true;
 			if (!this.grabbers.size) {
-				this.el.setAttribute('collision', 'kinematic', false);
+				if (this.deletePrompting) {
+					this.deleteSelf();
+				} else {
+					this.el.setAttribute('collision', 'kinematic', false);
+				}
 			}
 		}
 	},
@@ -3071,6 +3085,15 @@ AFRAME.registerComponent('grabbable', {
 	},
 	tick: function tick() {
 		if (this.grabbers.size) {
+			var setVisibility = function setVisibility(newVisibility) {
+				//to work around visibility not traversing on its own in altspace...
+				//afaik, none of these objects should ever have any reason to be invisible besides this,
+				//so I don't believe there's any reason to worry about clobbering values here.
+				self.el.object3D.traverse(function (curChild) {
+					curChild.visible = newVisibility;
+				});
+			};
+
 			if (this.grabbers.size == 1) {
 				//one-handed
 				var grabber = this.grabbers.values().next().value;
@@ -3108,6 +3131,46 @@ AFRAME.registerComponent('grabbable', {
 			setLocalTransform(this.el, newObjMtx);
 
 			this.lastLocalTransform.copy(localTransform);
+
+			var self = this;
+
+
+			if (this.grabbers.size == 2) {
+				// deletion state change can only happen because of resizing, which can only happen if both hands are engaged
+
+				boundingBox.setFromObject(this.el.object3D);
+				boundingBox.getSize(boundingSize);
+				boundingBox.getCenter(boundingCenter);
+				var boundingRad = boundingSize.length() / 2;
+				var newDeletePrompting = boundingRad < 0.1; //arbitrary; tune if it seems too big or small
+
+				if (newDeletePrompting != this.deletePrompting) {
+					this.deletePrompting = newDeletePrompting;
+					if (this.deletePrompting) {
+						deletionMessage.setAttribute("n-text", "text", "Drop to delete");
+					} else {
+						deletionMessage.setAttribute("n-text", "text", "");
+						setVisibility(true);
+					}
+				}
+
+				if (this.deletePrompting) {
+
+					setVisibility(Math.round(Date.now() / 100 % 2));
+
+					if (headJoint) {
+						var workMtx = new AFRAME.THREE.Matrix4();
+						workMtx.setPosition(boundingCenter);
+						workMtx.lookAt(headJoint.position, boundingCenter, upVec);
+						deletionMessage.object3D.matrix.identity();
+						deletionMessage.object3D.applyMatrix(workMtx);
+						var moveBy = new AFRAME.THREE.Vector3(0, 0, boundingRad);
+						moveBy.applyQuaternion(deletionMessage.object3D.quaternion);
+						deletionMessage.object3D.position.add(moveBy);
+						deletionMessage.object3D.scale.setScalar(0.5);
+					}
+				}
+			}
 		}
 	},
 	spawnPickup: function spawnPickup() {
@@ -3130,6 +3193,21 @@ AFRAME.registerComponent('grabbable', {
 			self.sync.dataRef.child('spawnClient').remove();
 			self.sync.dataRef.child('grabber').remove();
 		}
+	},
+	deleteSelf: function deleteSelf() {
+
+		deletionMessage.setAttribute("n-text", "text", "");
+
+		//is there already a method that takes care of this somewhere else?
+		//this is hardcoded with the same things as in spawner#spawn, which is copied from sync-system#instantiate...
+		//a more centralized way of approaching this might not be a bad idea,
+		//but unless there's something I've missed, I think it'd be outside of the scope of this feature
+		var myLongKey = this.el.id;
+		var instanceSeparatorString = '-instance-';
+		var myRealKey = myLongKey.substr(myLongKey.indexOf(instanceSeparatorString) + instanceSeparatorString.length);
+		var syncSys = this.el.sceneEl.systems['sync-system'];
+		syncSys.sceneRef.child('main-instance-' + myRealKey).remove();
+		syncSys.instantiatedElementsRef.child('main').child(myRealKey).remove();
 	}
 });
 
@@ -4456,6 +4534,20 @@ AFRAME.registerComponent('if-mod', {
 		} else {
 			this.el.sceneEl.addEventListener('connected', evaluateModStatus);
 		}
+	}
+});
+
+/*
+Due to a bug in A-Frame, components that were added as part of a mixin will not have their `remove` methods called.
+This causes significant problems when an entity that needs to be deletable is assigned a `collision` component via a mixin,
+but unfortunately the current sync system ONLY allows mixins for assigning components.
+To work around this for the moment, this "pseudo-mixin" will apply components manually via `setAttribute` instead, which avoids the bug.
+*/
+AFRAME.registerComponent('moddeco-pseudo', {
+	init: function init() {
+		this.el.setAttribute("collision", "with", "#lefthand,#righthand");
+		this.el.setAttribute("collision", "kinematic", true);
+		this.el.setAttribute("grabbable", "enabled", true);
 	}
 });
 

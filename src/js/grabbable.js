@@ -8,6 +8,18 @@ let scaleVec = new AFRAME.THREE.Vector3();
 let incrementMtx = new AFRAME.THREE.Matrix4();
 let inverseMtx = new AFRAME.THREE.Matrix4();
 let newObjMtx = new AFRAME.THREE.Matrix4();
+let boundingBox = new AFRAME.THREE.Box3();
+let boundingSize = new AFRAME.THREE.Vector3();
+let boundingCenter = new AFRAME.THREE.Vector3();
+
+let upVec = new AFRAME.THREE.Vector3(0,1,0);
+let offsetVec = new AFRAME.THREE.Vector3();
+let headJoint;
+altspace.getThreeJSTrackingSkeleton().then(
+	function(skeletonInfo){
+		headJoint = skeletonInfo.getJoint('Head');
+	}
+);
 
 AFRAME.registerComponent('grabbable', {
 	dependencies: ['sync'],
@@ -19,6 +31,7 @@ AFRAME.registerComponent('grabbable', {
 		this.grabbers = new Set();
 		this.lastLocalTransform = new AFRAME.THREE.Matrix4();
 		this.refreshGrab = false;
+		this.deletePrompting = false;
 
 		// pre-bound event handlers
 		this._hoverStart = this.hoverStart.bind(this);
@@ -62,7 +75,11 @@ AFRAME.registerComponent('grabbable', {
 			this.grabbers.delete(hand);
 			this.refreshGrab = true;
 			if(!this.grabbers.size){
-				this.el.setAttribute('collision', 'kinematic', false);
+				if (this.deletePrompting) {
+					this.deleteSelf();
+				} else {
+					this.el.setAttribute('collision', 'kinematic', false);
+				}
 			}
 		}
 	},
@@ -109,6 +126,61 @@ AFRAME.registerComponent('grabbable', {
 			setLocalTransform(this.el, newObjMtx);
 			
 			this.lastLocalTransform.copy(localTransform);
+			
+			
+			
+			let self = this;
+			function setVisibility(newVisibility){
+				//to work around visibility not traversing on its own in altspace...
+				//afaik, none of these objects should ever have any reason to be invisible besides this,
+				//so I don't believe there's any reason to worry about clobbering values here.
+				self.el.object3D.traverse(
+					function(curChild){ curChild.visible = newVisibility; }
+				);
+			}
+			
+			if (this.grabbers.size == 2) {// deletion state change can only happen because of resizing, which can only happen if both hands are engaged
+				
+				boundingBox.setFromObject(this.el.object3D);
+				boundingBox.getSize(boundingSize);
+				boundingBox.getCenter(boundingCenter);
+				let boundingRad = boundingSize.length()/2;
+				let newDeletePrompting = (boundingRad < 0.1);//arbitrary; tune if it seems too big or small
+				
+				if (newDeletePrompting != this.deletePrompting) {
+					this.deletePrompting = newDeletePrompting;
+					if (this.deletePrompting) {
+						deletionMessage.setAttribute("n-text","text","Drop to delete");
+					} else {
+						deletionMessage.setAttribute("n-text","text","");
+						setVisibility(true);
+					}
+				}
+				
+				if (this.deletePrompting) {
+					
+					setVisibility( Math.round((Date.now()/100)%2) );
+					
+					if (headJoint) {
+						newObjMtx.identity();
+						newObjMtx.setPosition(boundingCenter);
+						newObjMtx.lookAt(headJoint.position, boundingCenter, upVec);
+						deletionMessage.object3D.matrix.identity();
+						deletionMessage.object3D.applyMatrix(newObjMtx);
+						let offsetVec = new AFRAME.THREE.Vector3(0,0,boundingRad);
+						offsetVec.applyQuaternion(deletionMessage.object3D.quaternion);
+						deletionMessage.object3D.position.add(offsetVec);
+						deletionMessage.object3D.scale.setScalar(0.5);
+					}
+					
+				}
+				
+			}
+			
+			
+			
+			
+			
 		}
 	},
 	spawnPickup: function()
@@ -134,5 +206,21 @@ AFRAME.registerComponent('grabbable', {
 			self.sync.dataRef.child('spawnClient').remove();
 			self.sync.dataRef.child('grabber').remove();
 		}
+	},
+	deleteSelf: function(){
+		
+		deletionMessage.setAttribute("n-text","text","");
+		
+		//is there already a method that takes care of this somewhere else?
+		//this is hardcoded with the same things as in spawner#spawn, which is copied from sync-system#instantiate...
+		//a more centralized way of approaching this might not be a bad idea,
+		//but unless there's something I've missed, I think it'd be outside of the scope of this feature
+		let myLongKey = this.el.id;
+		let instanceSeparatorString = '-instance-';
+		let myRealKey = myLongKey.substr(myLongKey.indexOf(instanceSeparatorString) + instanceSeparatorString.length);
+		let syncSys = this.el.sceneEl.systems['sync-system'];
+		syncSys.sceneRef.child('main-instance-'+myRealKey).remove();
+		syncSys.instantiatedElementsRef.child('main').child(myRealKey).remove();
+		
 	}
 });

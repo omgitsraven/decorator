@@ -16,3 +16,4 @@ import './quaternion';
 import './decor-sync';
 import './sync-src';
 import './if-mod';
+import './pseudo-mixins';
