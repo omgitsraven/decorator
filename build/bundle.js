@@ -3002,6 +3002,18 @@ AFRAME.registerComponent('altspace-controls', {
 	}
 });
 
+var useGapAndPitchForTwoHandedRotation = true;
+// setting this true/false will choose between two methods
+// of how to resolve impossible situations in two-handed rotation
+// (situations that would tear the object in half if physical hands were gripping it.)
+//
+// true (gap and pitch) handles most scenarios better, but gets weird the more impossible the user's hands get.
+// false (slerp) gets less weird overall, but the weirdness becomes apparent much sooner.
+//
+// I'm leaving it as 'true' by default, since I think "seeing glitches less often" is the higher priority
+// (and as indicated, even the worst glitches are only minor and cosmetic; nothing harmful ever results.)
+
+
 //just to spare garbage collection:
 var localTransform = new AFRAME.THREE.Matrix4();
 var avgPos = new AFRAME.THREE.Vector3();
@@ -3013,8 +3025,12 @@ var newObjMtx = new AFRAME.THREE.Matrix4();
 var boundingBox = new AFRAME.THREE.Box3();
 var boundingSize = new AFRAME.THREE.Vector3();
 var boundingCenter = new AFRAME.THREE.Vector3();
+var rotMtx = new AFRAME.THREE.Matrix4();
+var upA = new AFRAME.THREE.Vector3();
+var upB = new AFRAME.THREE.Vector3();
 
 var upVec = new AFRAME.THREE.Vector3(0, 1, 0);
+var offsetVec = new AFRAME.THREE.Vector3();
 var headJoint = void 0;
 altspace.getThreeJSTrackingSkeleton().then(function (skeletonInfo) {
 	headJoint = skeletonInfo.getJoint('Head');
@@ -3100,13 +3116,24 @@ AFRAME.registerComponent('grabbable', {
 				localTransform.copy(grabber.object3D.matrix);
 			} else {
 				//two-handed
+
 				var curGrabbers = this.grabbers.values();
 				var grabA = curGrabbers.next().value;
 				var grabB = curGrabbers.next().value;
+
 				avgPos.copy(grabA.object3D.position).lerp(grabB.object3D.position, 0.5);
-				avgRot.copy(grabA.object3D.quaternion).slerp(grabB.object3D.quaternion, 0.5);
-				var scaleAmt = grabA.object3D.position.distanceTo(grabB.object3D.position);
-				scaleVec.set(scaleAmt, scaleAmt, scaleAmt);
+				scaleVec.setScalar(grabA.object3D.position.distanceTo(grabB.object3D.position));
+
+				if (useGapAndPitchForTwoHandedRotation) {
+					upA.set(0, 1, 0).applyQuaternion(grabA.object3D.quaternion);
+					upB.set(0, 1, 0).applyQuaternion(grabB.object3D.quaternion);
+					upA.lerp(upB, 0.5).normalize();
+					rotMtx.lookAt(grabA.object3D.position, grabB.object3D.position, upA);
+					avgRot.setFromRotationMatrix(rotMtx);
+				} else {
+					avgRot.copy(grabA.object3D.quaternion).slerp(grabB.object3D.quaternion, 0.5);
+				}
+
 				localTransform.compose(avgPos, avgRot, scaleVec);
 			}
 
@@ -3159,14 +3186,14 @@ AFRAME.registerComponent('grabbable', {
 					setVisibility(Math.round(Date.now() / 100 % 2));
 
 					if (headJoint) {
-						var workMtx = new AFRAME.THREE.Matrix4();
-						workMtx.setPosition(boundingCenter);
-						workMtx.lookAt(headJoint.position, boundingCenter, upVec);
+						newObjMtx.identity();
+						newObjMtx.setPosition(boundingCenter);
+						newObjMtx.lookAt(headJoint.position, boundingCenter, upVec);
 						deletionMessage.object3D.matrix.identity();
-						deletionMessage.object3D.applyMatrix(workMtx);
-						var moveBy = new AFRAME.THREE.Vector3(0, 0, boundingRad);
-						moveBy.applyQuaternion(deletionMessage.object3D.quaternion);
-						deletionMessage.object3D.position.add(moveBy);
+						deletionMessage.object3D.applyMatrix(newObjMtx);
+						var _offsetVec = new AFRAME.THREE.Vector3(0, 0, boundingRad);
+						_offsetVec.applyQuaternion(deletionMessage.object3D.quaternion);
+						deletionMessage.object3D.position.add(_offsetVec);
 						deletionMessage.object3D.scale.setScalar(0.5);
 					}
 				}

@@ -1,5 +1,20 @@
 import {setLocalTransform} from './utils';
 
+
+
+let useGapAndPitchForTwoHandedRotation = true;
+// setting this true/false will choose between two methods
+// of how to resolve impossible situations in two-handed rotation
+// (situations that would tear the object in half if physical hands were gripping it.)
+//
+// true (gap and pitch) handles most scenarios better, but gets weird the more impossible the user's hands get.
+// false (slerp) gets less weird overall, but the weirdness becomes apparent much sooner.
+//
+// I'm leaving it as 'true' by default, since I think "seeing glitches less often" is the higher priority
+// (and as indicated, even the worst glitches are only minor and cosmetic; nothing harmful ever results.)
+
+
+
 //just to spare garbage collection:
 let localTransform = new AFRAME.THREE.Matrix4();
 let avgPos = new AFRAME.THREE.Vector3();
@@ -11,6 +26,9 @@ let newObjMtx = new AFRAME.THREE.Matrix4();
 let boundingBox = new AFRAME.THREE.Box3();
 let boundingSize = new AFRAME.THREE.Vector3();
 let boundingCenter = new AFRAME.THREE.Vector3();
+let rotMtx = new AFRAME.THREE.Matrix4();
+let upA = new AFRAME.THREE.Vector3();
+let upB = new AFRAME.THREE.Vector3();
 
 let upVec = new AFRAME.THREE.Vector3(0,1,0);
 let offsetVec = new AFRAME.THREE.Vector3();
@@ -95,14 +113,26 @@ AFRAME.registerComponent('grabbable', {
 				let grabber = this.grabbers.values().next().value;
 				localTransform.copy(grabber.object3D.matrix);
 			} else {//two-handed
+				
 				let curGrabbers = this.grabbers.values();
 				let grabA = curGrabbers.next().value;
 				let grabB = curGrabbers.next().value;
+				
 				avgPos.copy(grabA.object3D.position).lerp(grabB.object3D.position,0.5);
-				avgRot.copy(grabA.object3D.quaternion).slerp(grabB.object3D.quaternion,0.5);
-				let scaleAmt = grabA.object3D.position.distanceTo(grabB.object3D.position);
-				scaleVec.set(scaleAmt,scaleAmt,scaleAmt);
+				scaleVec.setScalar(grabA.object3D.position.distanceTo(grabB.object3D.position));
+				
+				if (useGapAndPitchForTwoHandedRotation) {
+					upA.set(0,1,0).applyQuaternion(grabA.object3D.quaternion);
+					upB.set(0,1,0).applyQuaternion(grabB.object3D.quaternion);
+					upA.lerp(upB,0.5).normalize();
+					rotMtx.lookAt(grabA.object3D.position,grabB.object3D.position,upA);
+					avgRot.setFromRotationMatrix(rotMtx);
+				} else {
+					avgRot.copy(grabA.object3D.quaternion).slerp(grabB.object3D.quaternion,0.5);
+				}
+				
 				localTransform.compose(avgPos,avgRot,scaleVec);
+				
 			}
 			
 			inverseMtx.getInverse(this.el.object3D.parent.matrixWorld);
